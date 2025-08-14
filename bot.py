@@ -1,93 +1,80 @@
 import os
+import asyncio
+from fastapi import FastAPI
+import uvicorn
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-# Токен и ID чата
+# --- Переменные окружения ---
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
-# Хранилище заявок
+# --- Статус заявок ---
 tickets = {}
 ticket_counter = 1
 
-# Команда /start для пользователя
+# --- Команда /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("ПО", callback_data="type_software")],
-        [InlineKeyboardButton("Оборудование", callback_data="type_hardware")],
-        [InlineKeyboardButton("Сеть", callback_data="type_network")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Привет! Выбери тип проблемы:", reply_markup=reply_markup)
+    await update.message.reply_text(
+        "Привет! Напиши описание своей проблемы. Можно с фото."
+    )
 
-# Выбор типа проблемы
-async def type_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data['type'] = query.data.split('_')[1]  # сохраняем выбор
-    await query.edit_message_text(text=f"Ты выбрал {context.user_data['type']}. Теперь опиши проблему.")
-
-# Обработка сообщений и фото
+# --- Обработка сообщений и фото ---
 async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ticket_counter
-    user_type = context.user_data.get('type', 'Не указан')
     ticket_id = ticket_counter
     ticket_counter += 1
 
-    ticket = {
-        "user": update.message.from_user.full_name,
-        "text": update.message.text or "",
-        "photo": update.message.photo[-1].file_id if update.message.photo else None,
-        "status": "Новая",
-        "type": user_type
-    }
-    tickets[ticket_id] = ticket
+    status = "Новая"
+    tickets[ticket_id] = {"user": update.message.from_user.full_name, "status": status}
 
+    text = f"🆕 Заявка #{ticket_id} от {update.message.from_user.full_name}\nСтатус: {status}\n"
+    if update.message.text:
+        text += f"Описание: {update.message.text}"
+        await context.bot.send_message(chat_id=CHAT_ID, text=text)
+    elif update.message.photo:
+        photo_id = update.message.photo[-1].file_id
+        caption = f"{text}\nФото-заявка"
+        await context.bot.send_photo(chat_id=CHAT_ID, photo=photo_id, caption=caption)
+
+    # Кнопки для пользователя
     keyboard = [
-        [
-            InlineKeyboardButton("В работе", callback_data=f"status_{ticket_id}_in_progress"),
-            InlineKeyboardButton("Исполнена", callback_data=f"status_{ticket_id}_done")
-        ]
+        [InlineKeyboardButton("Проверить статус заявки", callback_data=f"status_{ticket_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Заявка отправлена! Можно проверить статус ниже:", reply_markup=reply_markup)
 
-    msg = f"🆕 Заявка #{ticket_id}\nТип: {ticket['type']}\nСтатус: {ticket['status']}\nОт: {ticket['user']}\nОписание: {ticket['text']}"
-
-    if ticket['photo']:
-        await context.bot.send_photo(chat_id=CHAT_ID, photo=ticket['photo'], caption=msg, reply_markup=reply_markup)
-    else:
-        await context.bot.send_message(chat_id=CHAT_ID, text=msg, reply_markup=reply_markup)
-
-    await update.message.reply_text(f"Заявка #{ticket_id} отправлена! Статус: {ticket['status']}")
-
-# Смена статуса заявки
-async def status_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Обработка кнопок ---
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data.split('_')
-    ticket_id = int(data[1])
-    new_status = "В работе" if data[2] == "in" else "Исполнена"
+    data = query.data
+    if data.startswith("status_"):
+        ticket_id = int(data.split("_")[1])
+        ticket = tickets.get(ticket_id)
+        if ticket:
+            await query.edit_message_text(f"Заявка #{ticket_id} от {ticket['user']}\nСтатус: {ticket['status']}")
+        else:
+            await query.edit_message_text("Заявка не найдена.")
 
-    if ticket_id in tickets:
-        tickets[ticket_id]['status'] = new_status
-        ticket = tickets[ticket_id]
-        msg = f"📝 Заявка #{ticket_id}\nТип: {ticket['type']}\nСтатус: {ticket['status']}\nОт: {ticket['user']}\nОписание: {ticket['text']}"
-        await query.edit_message_text(text=msg)
-    else:
-        await query.edit_message_text("Заявка не найдена.")
+# --- FastAPI для обхода Render in progress ---
+app = FastAPI()
 
-# Главная функция
-def main():
-    app = Application.builder().token(TOKEN).build()
+@app.get("/")
+async def root():
+    return {"status": "ok"}
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(type_choice, pattern="^type_"))
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, relay))
-    app.add_handler(CallbackQueryHandler(status_change, pattern="^status_"))
+# --- Запуск бота ---
+async def start_bot():
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, relay))
+    application.add_handler(CallbackQueryHandler(button))
+    await application.run_polling()
 
-    # Запуск как воркер — long polling
-    print("Бот запущен как Render worker...")
-    app.run_polling()
-
+# --- Главная функция ---
 if __name__ == "__main__":
-    main()
+    # Запускаем FastAPI и бота одновременно
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_bot())
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
