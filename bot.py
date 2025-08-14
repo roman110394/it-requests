@@ -1,6 +1,6 @@
 import os
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Переменные окружения
 TOKEN = os.getenv("TOKEN")
@@ -25,11 +25,14 @@ async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Основная функция
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    # Создаем приложение
+    app = Application.builder().token(TOKEN).build()
 
+    # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, relay))
 
+    # Запуск
     app.run_polling()
 
 if __name__ == "__main__":
