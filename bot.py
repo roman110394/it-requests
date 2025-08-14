@@ -1,39 +1,92 @@
 import os
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# Переменные окружения
+# Токен и ID чата
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
-# Команда /start
+# Хранилище заявок
+tickets = {}
+ticket_counter = 1
+
+# Команда /start для пользователя
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Напиши описание проблемы, можно с фото.")
+    keyboard = [
+        [InlineKeyboardButton("ПО", callback_data="type_software")],
+        [InlineKeyboardButton("Оборудование", callback_data="type_hardware")],
+        [InlineKeyboardButton("Сеть", callback_data="type_network")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Привет! Выбери тип проблемы:", reply_markup=reply_markup)
+
+# Выбор типа проблемы
+async def type_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data['type'] = query.data.split('_')[1]  # сохраняем выбор
+    await query.edit_message_text(text=f"Ты выбрал {context.user_data['type']}. Теперь опиши проблему.")
 
 # Обработка сообщений и фото
 async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text:
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"🆕 Заявка от {update.message.from_user.full_name}:\n{update.message.text}"
-        )
-    elif update.message.photo:
-        photo_id = update.message.photo[-1].file_id
-        caption = f"🆕 Фото-заявка от {update.message.from_user.full_name}"
-        await context.bot.send_photo(chat_id=CHAT_ID, photo=photo_id, caption=caption)
-    await update.message.reply_text("Заявка отправлена в ИТ-чат!")
+    global ticket_counter
+    user_type = context.user_data.get('type', 'Не указан')
+    ticket_id = ticket_counter
+    ticket_counter += 1
 
+    ticket = {
+        "user": update.message.from_user.full_name,
+        "text": update.message.text or "",
+        "photo": update.message.photo[-1].file_id if update.message.photo else None,
+        "status": "Новая",
+        "type": user_type
+    }
+    tickets[ticket_id] = ticket
+
+    keyboard = [
+        [
+            InlineKeyboardButton("В работе", callback_data=f"status_{ticket_id}_in_progress"),
+            InlineKeyboardButton("Исполнена", callback_data=f"status_{ticket_id}_done")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    msg = f"🆕 Заявка #{ticket_id}\nТип: {ticket['type']}\nСтатус: {ticket['status']}\nОт: {ticket['user']}\nОписание: {ticket['text']}"
+
+    if ticket['photo']:
+        await context.bot.send_photo(chat_id=CHAT_ID, photo=ticket['photo'], caption=msg, reply_markup=reply_markup)
+    else:
+        await context.bot.send_message(chat_id=CHAT_ID, text=msg, reply_markup=reply_markup)
+
+    await update.message.reply_text(f"Заявка #{ticket_id} отправлена! Статус: {ticket['status']}")
+
+# Смена статуса заявки
+async def status_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data.split('_')
+    ticket_id = int(data[1])
+    new_status = "В работе" if data[2] == "in" else "Исполнена"
+
+    if ticket_id in tickets:
+        tickets[ticket_id]['status'] = new_status
+        ticket = tickets[ticket_id]
+        msg = f"📝 Заявка #{ticket_id}\nТип: {ticket['type']}\nСтатус: {ticket['status']}\nОт: {ticket['user']}\nОписание: {ticket['text']}"
+        await query.edit_message_text(text=msg)
+    else:
+        await query.edit_message_text("Заявка не найдена.")
+
+# Главная функция
 def main():
-    # Создаем приложение
     app = Application.builder().token(TOKEN).build()
 
-    # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(type_choice, pattern="^type_"))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, relay))
+    app.add_handler(CallbackQueryHandler(status_change, pattern="^status_"))
 
-    # Запуск polling
-    # Это блокирует поток, но Render будет считать процесс живым
-    print("Бот запущен и работает...")
+    # Запуск как воркер — long polling
+    print("Бот запущен как Render worker...")
     app.run_polling()
 
 if __name__ == "__main__":
